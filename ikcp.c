@@ -244,14 +244,14 @@ ikcpcb* ikcp_create(IUINT32 conv, void *user)
 	kcp->ts_lastack = 0;
 	kcp->ts_probe = 0;
 	kcp->probe_wait = 0;
-	kcp->snd_wnd = IKCP_WND_SND;
-	kcp->rcv_wnd = IKCP_WND_RCV;
-	kcp->rmt_wnd = IKCP_WND_RCV;
+	kcp->snd_wnd = IKCP_WND_SND;  //32
+	kcp->rcv_wnd = IKCP_WND_RCV;  // 128
+	kcp->rmt_wnd = IKCP_WND_RCV;  
 	kcp->cwnd = 0;
 	kcp->incr = 0;
 	kcp->probe = 0;
-	kcp->mtu = IKCP_MTU_DEF;
-	kcp->mss = kcp->mtu - IKCP_OVERHEAD;
+	kcp->mtu = IKCP_MTU_DEF;  //1400
+	kcp->mss = kcp->mtu - IKCP_OVERHEAD;  //1400 -24
 	kcp->stream = 0;
 
 	kcp->buffer = (char*)ikcp_malloc((kcp->mtu + IKCP_OVERHEAD) * 3);
@@ -466,6 +466,10 @@ int ikcp_peeksize(const ikcpcb *kcp)
 //---------------------------------------------------------------------
 // user/upper level send, returns below zero for error
 //---------------------------------------------------------------------
+
+// 应用层调用 ikcp_send 之后将用户数据置入 snd_queue 中，
+// 当 KCP 调用 ikcp_flush 时才将数据从 snd_queue 中 移入到 snd_buf 中，
+// 然后调用 kcp->output() 发送
 int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 {
 	IKCPSEG *seg;
@@ -475,6 +479,7 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 	if (len < 0) return -1;
 
 	// append to previous segment in streaming mode (if possible)
+	// 1. 如果是流模式 将snd_queue最后一个节点拿出来，用数据补满  frg=0
 	if (kcp->stream != 0) {
 		if (!iqueue_is_empty(&kcp->snd_queue)) {
 			IKCPSEG *old = iqueue_entry(kcp->snd_queue.prev, IKCPSEG, node);
@@ -503,7 +508,7 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 			return 0;
 		}
 	}
-
+	// 2. 计算剩下的数据需要分成几段
 	if (len <= (int)kcp->mss) count = 1;
 	else count = (len + kcp->mss - 1) / kcp->mss;
 
@@ -512,6 +517,7 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 	if (count == 0) count = 1;
 
 	// fragment
+	// 3. 为剩下的数据创建 KCP segment
 	for (i = 0; i < count; i++) {
 		int size = len > (int)kcp->mss ? (int)kcp->mss : len;
 		seg = ikcp_segment_new(kcp, size);
@@ -523,6 +529,7 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 			memcpy(seg->data, buffer, size);
 		}
 		seg->len = size;
+		// 流模式情况下分片编号不用填写
 		seg->frg = (kcp->stream == 0)? (count - i - 1) : 0;
 		iqueue_init(&seg->node);
 		iqueue_add_tail(&seg->node, &kcp->snd_queue);
@@ -542,6 +549,12 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 //---------------------------------------------------------------------
 static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
 {
+	// 根据 ACK 时间戳更新本地的 rtt rx_rto
+	// rx_rttvar	ack接收rtt浮动值
+	// rx_srtt ack接收rtt静态值
+	// rx_rto	由ack接收延迟计算出来的复原时间
+	// rx_minrto 最小复原时间
+	// interval	内部flush刷新间隔
 	IINT32 rto = 0;
 	if (kcp->rx_srtt == 0) {
 		kcp->rx_srtt = rtt;
@@ -557,10 +570,12 @@ static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
 	kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, IKCP_RTO_MAX);
 }
 
+// 更新 KCP 控制块的 snd_una 数值
 static void ikcp_shrink_buf(ikcpcb *kcp)
 {
 	struct IQUEUEHEAD *p = kcp->snd_buf.next;
 	if (p != &kcp->snd_buf) {
+		// 非空 buff中第一个报文的sn就是snd_una
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
 		kcp->snd_una = seg->sn;
 	}	else {
@@ -568,6 +583,9 @@ static void ikcp_shrink_buf(ikcpcb *kcp)
 	}
 }
 
+// 根据 ACK 的编号确认对方收到了哪个数据包；
+// 注意KCP 中同时使用了 UNA 以及 ACK 编号的报文确认手段。
+// UNA 表示此前所有的数据都已经被接收到，而 ACK 表示指定编号的数据包被接收到；
 static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
 {
 	struct IQUEUEHEAD *p, *next;
@@ -590,8 +608,15 @@ static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
 	}
 }
 
+// 调用 ikcp_parse_una 来确定已经发送的数据包有哪些被对方接收到
 static void ikcp_parse_una(ikcpcb *kcp, IUINT32 una)
 {
+	// 发送端发送的数据都会缓存在 snd_buf 中，直到接收到对方确认信息之后才会删除。
+	// 当接收到 una 信息后，表明 sn 小于 una 的数据包都已经被对方接收到，
+	// 因此可以直接从 snd_buf 中删除
+
+	// snd_una 第一个未确认的包
+	// snd_nxt	待发送包的序号
 	struct IQUEUEHEAD *p, *next;
 	for (p = kcp->snd_buf.next; p != &kcp->snd_buf; p = next) {
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
@@ -746,6 +771,7 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 //---------------------------------------------------------------------
 // input data
 //---------------------------------------------------------------------
+// KCP 协议需要从底层接受数据到 rcv_buf 中
 int ikcp_input(ikcpcb *kcp, const char *data, long size)
 {
 	IUINT32 prev_una = kcp->snd_una;
@@ -765,7 +791,7 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		IKCPSEG *seg;
 
 		if (size < (int)IKCP_OVERHEAD) break;
-
+		// 首先将接收到的数据包进行解码，并进行基本的数据包长度和类型校验；
 		data = ikcp_decode32u(data, &conv);
 		if (conv != kcp->conv) return -1;
 
@@ -780,21 +806,34 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		size -= IKCP_OVERHEAD;
 
 		if ((long)size < (long)len || (int)len < 0) return -2;
-
+		// KCP 协议只会接收到这四种数据包
 		if (cmd != IKCP_CMD_PUSH && cmd != IKCP_CMD_ACK &&
 			cmd != IKCP_CMD_WASK && cmd != IKCP_CMD_WINS) 
 			return -3;
-
+		// IKCP_CMD_PUSH : 传输的数据包
+		// IKCP_CMD_ACK : ACK包，类似于 TCP中的 ACK，通知对方收到了哪些包
+		// IKCP_CMD_WASK : 用来探测远端窗口大小
+		// IKCP_CMD_WINS : 告诉对方自己窗口大小
 		kcp->rmt_wnd = wnd;
+		// 调用 ikcp_parse_una 来确定已经发送的数据包有哪些被对方接收到
 		ikcp_parse_una(kcp, una);
+		// 更新 KCP 控制块的 snd_una 数值： 
 		ikcp_shrink_buf(kcp);
 
 		if (cmd == IKCP_CMD_ACK) {
+			/*
+			处理 IKCP_CMD_ACK 报文：
+				调用 ikcp_update_ack 来根据 ACK 时间戳更新本地的 rtt，这类似于 TCP 协议；
+				之后调用函数 ikcp_parse_ack 来根据 ACK 的编号确认对方收到了哪个数据包；注意KCP 中同时使用了 UNA 以及 ACK 编号的报文确认手段。UNA 表示此前所有的数据都已经被接收到，而 ACK 表示指定编号的数据包被接收到；
+				调用 ikcp_shrink_buf 来更新 KCP 控制块的 snd_una；
+				记录当前收到的最大的 ACK 编号，在快重传的过程计算已发送的数据包被跳过的次数；
+			*/
 			if (_itimediff(kcp->current, ts) >= 0) {
 				ikcp_update_ack(kcp, _itimediff(kcp->current, ts));
 			}
 			ikcp_parse_ack(kcp, sn);
 			ikcp_shrink_buf(kcp);
+			// 用来处理连续收到的多个ack包，而且ack包可能会乱序
 			if (flag == 0) {
 				flag = 1;
 				maxack = sn;
