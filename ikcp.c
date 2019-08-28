@@ -633,11 +633,12 @@ static void ikcp_parse_una(ikcpcb *kcp, IUINT32 una)
 
 static void ikcp_parse_fastack(ikcpcb *kcp, IUINT32 sn, IUINT32 ts)
 {
+	// 计算snd_buf中包的fastack, 为后面的快速重传提供数据基础
 	struct IQUEUEHEAD *p, *next;
 
 	if (_itimediff(sn, kcp->snd_una) < 0 || _itimediff(sn, kcp->snd_nxt) >= 0)
 		return;
-
+	// 从头到尾遍历snd_buf(有序)， 所有小于sn的包fastack都要+1
 	for (p = kcp->snd_buf.next; p != &kcp->snd_buf; p = next) {
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
 		next = p->next;
@@ -713,13 +714,13 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 	struct IQUEUEHEAD *p, *prev;
 	IUINT32 sn = newseg->sn;
 	int repeat = 0;
-	
+	// 不在窗口里 就删掉并返回
 	if (_itimediff(sn, kcp->rcv_nxt + kcp->rcv_wnd) >= 0 ||
 		_itimediff(sn, kcp->rcv_nxt) < 0) {
 		ikcp_segment_delete(kcp, newseg);
 		return;
 	}
-
+	// 从尾部开始遍历 找等于sn的 找到说明重复包 由于buf是有序的 只需要找到第一个小于sn的就可以停止遍历
 	for (p = kcp->rcv_buf.prev; p != &kcp->rcv_buf; p = prev) {
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
 		prev = p->prev;
@@ -731,7 +732,7 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 			break;
 		}
 	}
-
+	// 没有找到的话说明是第一次收到这个包 插入到buf中对应的位置
 	if (repeat == 0) {
 		iqueue_init(&newseg->node);
 		iqueue_add(&newseg->node, p);
@@ -896,6 +897,8 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		else if (cmd == IKCP_CMD_WASK) {
 			// ready to send back IKCP_CMD_WINS in ikcp_flush
 			// tell remote my window size
+			// 用来探测远端窗口大小
+			// 对于接收到的 IKCP_CMD_WASK 报文，直接标记下次将发送窗口通知报文
 			kcp->probe |= IKCP_ASK_TELL;
 			if (ikcp_canlog(kcp, IKCP_LOG_IN_PROBE)) {
 				ikcp_log(kcp, IKCP_LOG_IN_PROBE, "input probe");
@@ -903,6 +906,7 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		}
 		else if (cmd == IKCP_CMD_WINS) {
 			// do nothing
+			// 告诉对方自己窗口大小 
 			if (ikcp_canlog(kcp, IKCP_LOG_IN_WINS)) {
 				ikcp_log(kcp, IKCP_LOG_IN_WINS,
 					"input wins: %lu", (IUINT32)(wnd));
@@ -915,11 +919,15 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		data += len;
 		size -= len;
 	}
-
+	// 包解析处理结束，所有的数据包都已经到rcv_buf, acklist也妥当
+	// 根据记录的最大的 ACK 编号 maxack 来更新 snd_buf 中的报文的 fastack
+	// 快速重传逻辑
 	if (flag != 0) {
 		ikcp_parse_fastack(kcp, maxack, latest_ts);
 	}
-
+	
+	// 根据接收到报文的 una 和 KCP 控制块的 una 参数进行流控
+	// 拥塞控制逻辑：cwnd < rmt_wnd 触发
 	if (_itimediff(kcp->snd_una, prev_una) > 0) {
 		if (kcp->cwnd < kcp->rmt_wnd) {
 			IUINT32 mss = kcp->mss;
@@ -961,7 +969,7 @@ static char *ikcp_encode_seg(char *ptr, const IKCPSEG *seg)
 }
 
 static int ikcp_wnd_unused(const ikcpcb *kcp)
-{
+{	// 接收窗口大小 - 接收队列长度
 	if (kcp->nrcv_que < kcp->rcv_wnd) {
 		return kcp->rcv_wnd - kcp->nrcv_que;
 	}
