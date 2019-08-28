@@ -355,8 +355,10 @@ void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len,
 //---------------------------------------------------------------------
 // user/upper level recv: returns size, returns below zero for EAGAIN
 //---------------------------------------------------------------------
+// 应用层接收函数
 int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 {
+	// 将数据从 rcv_queue 中移动到应用层 buffer 中,
 	struct IQUEUEHEAD *p;
 	int ispeek = (len < 0)? 1 : 0;
 	int peeksize;
@@ -409,7 +411,8 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 	}
 
 	assert(len == peeksize);
-
+	 // 下一步将 rcv_buf 中的数据转移到 rcv_queue 中，
+	 // 这个过程根据报文的 sn 编号来确保转移到 rcv_queue 中的数据一定是按序的
 	// move available data from rcv_buf -> rcv_queue
 	while (! iqueue_is_empty(&kcp->rcv_buf)) {
 		IKCPSEG *seg = iqueue_entry(kcp->rcv_buf.next, IKCPSEG, node);
@@ -423,7 +426,9 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 			break;
 		}
 	}
-
+	//
+	// 最后进行窗口恢复。此时如果 recover 标记为1，表明在此次接收之前，可用接收窗口为0，
+	// 如果经过本次接收之后，可用窗口大于0，将主动发送 IKCP_ASK_TELL 数据包来通知对方已可以接收数据：
 	// fast recover
 	if (kcp->nrcv_que < kcp->rcv_wnd && recover) {
 		// ready to send back IKCP_CMD_WINS in ikcp_flush
