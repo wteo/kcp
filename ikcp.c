@@ -661,9 +661,11 @@ static void ikcp_parse_fastack(ikcpcb *kcp, IUINT32 sn, IUINT32 ts)
 //---------------------------------------------------------------------
 static void ikcp_ack_push(ikcpcb *kcp, IUINT32 sn, IUINT32 ts)
 {
+	// 将对该报文的确认 ACK 报文放入 ACK 列表中
 	size_t newsize = kcp->ackcount + 1;
 	IUINT32 *ptr;
 
+	// 扩容逻辑， ackblock acklist的整块大小
 	if (newsize > kcp->ackblock) {
 		IUINT32 *acklist;
 		size_t newblock;
@@ -689,6 +691,7 @@ static void ikcp_ack_push(ikcpcb *kcp, IUINT32 sn, IUINT32 ts)
 		kcp->ackblock = newblock;
 	}
 
+	// 将sn和ts写到ack_list中
 	ptr = &kcp->acklist[kcp->ackcount * 2];
 	ptr[0] = sn;
 	ptr[1] = ts;
@@ -828,7 +831,7 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 				调用 ikcp_shrink_buf 来更新 KCP 控制块的 snd_una；
 				记录当前收到的最大的 ACK 编号，在快重传的过程计算已发送的数据包被跳过的次数；
 			*/
-			if (_itimediff(kcp->current, ts) >= 0) {
+			if (_itimediff(kcp->current, ts) >=· 0) {
 				ikcp_update_ack(kcp, _itimediff(kcp->current, ts));
 			}
 			ikcp_parse_ack(kcp, sn);
@@ -859,6 +862,12 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 			}
 		}
 		else if (cmd == IKCP_CMD_PUSH) {
+			//处理 IKCP_CMD_PUSH 报文：
+			//	对于来自于对方的标准数据包，首先需要检测该报文的编号 sn 是否在窗口范围内；
+			//	调用 ikcp_ack_push 将对该报文的确认 ACK 报文放入 ACK 列表中，ACK 列表的组织方式在前文中已经介绍；
+			//	最后调用 ikcp_parse_data 将该报文插入到 rcv_buf 链表中；
+			//
+			//
 			if (ikcp_canlog(kcp, IKCP_LOG_IN_DATA)) {
 				ikcp_log(kcp, IKCP_LOG_IN_DATA, 
 					"input psh: sn=%lu ts=%lu", sn, ts);
