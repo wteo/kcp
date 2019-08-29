@@ -999,6 +999,9 @@ void ikcp_flush(ikcpcb *kcp)
 	IKCPSEG seg;
 
 	// 'ikcp_update' haven't been called. 
+	// 检查 kcp->update 是否更新，未更新直接返回。kcp->update 由 ikcp_update 更新，
+	// 上层应用需要每隔一段时间（10-100ms）调用 ikcp_update 来驱动 KCP 发送数据；
+
 	if (kcp->updated == 0) return;
 
 	seg.conv = kcp->conv;
@@ -1011,6 +1014,8 @@ void ikcp_flush(ikcpcb *kcp)
 	seg.ts = 0;
 
 	// flush acknowledges
+	// 准备将 acklist 中记录的 ACK 报文发送出去，
+	// 即从 acklist 中填充 ACK 报文的 sn 和 ts 字段
 	count = kcp->ackcount;
 	for (i = 0; i < count; i++) {
 		size = (int)(ptr - buffer);
@@ -1025,6 +1030,12 @@ void ikcp_flush(ikcpcb *kcp)
 	kcp->ackcount = 0;
 
 	// probe window size (if remote window size equals zero)
+	// 检查当前是否需要对远端窗口进行探测。
+	// 由于 KCP 流量控制依赖于远端通知其可接受窗口的大小，
+	// 一旦远端接受窗口 kcp->rmt_wnd 为0，那么本地将不会再向远端发送数据，
+	// 因此就没有机会从远端接受 ACK 报文，从而没有机会更新远端窗口大小。
+	// 在这种情况下，KCP 需要发送窗口探测报文到远端，待远端回复窗口大小后，
+	// 后续传输可以继续：
 	if (kcp->rmt_wnd == 0) {
 		if (kcp->probe_wait == 0) {
 			kcp->probe_wait = IKCP_PROBE_INIT;
