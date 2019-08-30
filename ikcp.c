@@ -575,7 +575,7 @@ static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
 	kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, IKCP_RTO_MAX);
 }
 
-// 更新 KCP 控制块的 snd_una 数值
+// 更新 KCP 控制块的 snd_una 数值, snd_una: 第一个未确认的包
 static void ikcp_shrink_buf(ikcpcb *kcp)
 {
 	struct IQUEUEHEAD *p = kcp->snd_buf.next;
@@ -752,8 +752,10 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 #endif
 
 	// move available data from rcv_buf -> rcv_queue
+	// 同时也把buf前面满足条件的包移到rcv_queue中
 	while (! iqueue_is_empty(&kcp->rcv_buf)) {
 		IKCPSEG *seg = iqueue_entry(kcp->rcv_buf.next, IKCPSEG, node);
+		// 第一个包是rcv_nxt 并且接收窗口 大于 queue中个数
 		if (seg->sn == kcp->rcv_nxt && kcp->nrcv_que < kcp->rcv_wnd) {
 			iqueue_del(&seg->node);
 			kcp->nrcv_buf--;
@@ -837,7 +839,7 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 				调用 ikcp_shrink_buf 来更新 KCP 控制块的 snd_una；
 				记录当前收到的最大的 ACK 编号，在快重传的过程计算已发送的数据包被跳过的次数；
 			*/
-			if (_itimediff(kcp->current, ts) >=· 0) {
+			if (_itimediff(kcp->current, ts) >= 0) {
 				ikcp_update_ack(kcp, _itimediff(kcp->current, ts));
 			}
 			ikcp_parse_ack(kcp, sn);
@@ -974,7 +976,7 @@ static char *ikcp_encode_seg(char *ptr, const IKCPSEG *seg)
 }
 
 static int ikcp_wnd_unused(const ikcpcb *kcp)
-{	// 接收窗口大小 - 接收队列长度
+{	// 可用接收窗口大小
 	if (kcp->nrcv_que < kcp->rcv_wnd) {
 		return kcp->rcv_wnd - kcp->nrcv_que;
 	}
